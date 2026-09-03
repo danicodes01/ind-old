@@ -9,11 +9,14 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon",
-      "bundleIdentifier": "com.danielknowles.ind",
-      "supportsTablet": true
+      "bundleIdentifier": "studio.mikanoko.ind",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
-      "package": "com.danielknowles.ind",
+      "package": "studio.mikanoko.ind",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -43,6 +46,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d8eb53ed-1867-413e-b6fa-53d85cdc2146"
+      }
+    },
+    "owner": "mikanoko-studio"
   }
 }
