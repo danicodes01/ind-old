@@ -41,3 +41,9 @@ example
 # generated native folders
 /ios
 /android
+
+# coverage
+/coverage
+
+# env
+.env

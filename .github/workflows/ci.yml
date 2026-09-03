@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test:ci
+
+      - name: Verify migrations are in sync with schema
+        # drizzle-kit generate is deterministic. If it produces a diff, someone changed
+        # schema.ts without generating the migration. See ADR-003.
+        run: |
+          npx drizzle-kit generate
+          if [ -n "$(git status --porcelain src/data/db/migrations)" ]; then
+            echo "::error::schema.ts changed without a generated migration. Run: npm run db:generate"
+            git status --porcelain src/data/db/migrations
+            exit 1
+          fi
