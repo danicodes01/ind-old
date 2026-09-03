@@ -7,8 +7,10 @@ ports in `src/data/sync/ports.ts`; nothing here assumes Supabase.
 
 These are what make the design tractable, and they should be re-examined if any stops holding:
 
-- **Single writer.** One human owns the data. Concurrent edits happen only when the same person
-  uses two devices, and are rare.
+- **One user, no sharing.** One person owns the data and nobody else can read or write it. With
+  Pro they may write from more than one device, so there genuinely can be two writers — but only
+  ever the same person, and rarely at the same moment. It is the absence of _sharing_, not the
+  presence of a single writer, that makes this tractable.
 - **No collaborative editing.** No shared jobs, no team shifts, no merge semantics to invent.
 - **Small rows, append-mostly.** A year of one person's shifts is a few hundred KB. Edits are
   overwhelmingly to recent rows.
@@ -19,6 +21,14 @@ These are what make the design tractable, and they should be re-examined if any 
 **Non-goals:** real-time updates, partial/selective sync, operational transforms or CRDTs,
 server-side computation. All are unnecessary at this data shape and each would cost real
 complexity.
+
+## What syncs
+
+Three tables replicate: **`jobs`**, **`shifts`**, **`expenses`**.
+
+Everything else is local-only and never leaves the device — `local_account`, `sync_state`,
+`sync_conflicts`, `settings`, and the underscore-prefixed columns on syncable rows. See
+[DATA-MODEL.md](DATA-MODEL.md).
 
 ## State
 
@@ -83,24 +93,29 @@ resumes from where it stopped, and never re-reads more than one page.
    any other, and excluding them would prevent deletes from propagating.
 2. For each incoming row `R`, find local row `L` and apply:
 
-| Condition                                  | Action                                                                                                                              |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| no `L`                                     | Insert `R` as `synced`, `_base_updated_at = R.updated_at`. (Including if `R` is soft-deleted — the tombstone matters)               |
-| `L._sync_state = synced`                   | Overwrite `L` with `R`. The server is authoritative for clean rows                                                                  |
-| `L._sync_state = modified` or `local_only` | **Keep `L`.** Copy `R` into `sync_conflicts`; record `R.updated_at` as `L._base_updated_at` so the next push carries the right base |
+| Condition                                  | Action                                                                                                                                               |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no `L`                                     | Insert `R` as `synced`, `_base_updated_at = R.updated_at`. (Including if `R` is soft-deleted — the tombstone matters)                                |
+| `L._sync_state = synced`                   | Overwrite `L` with `R`. The server is authoritative for clean rows                                                                                   |
+| `L._sync_state = modified` or `local_only` | **Keep `L`.** Copy `R` into `sync_conflicts`; adopt `R.updated_at` as `L._base_updated_at` — this is the conflict policy, not bookkeeping. See below |
 
 3. Commit the page and advance the cursor in the **same transaction**. A crash between the two
    would otherwise either lose rows or replay them.
 4. Repeat until a page returns fewer rows than the limit.
 
-### Why locally-changed rows are not overwritten
+### Why locally-changed rows are not overwritten — and why the base moves
 
-If someone edits a shift on this phone and a stale copy arrives from the server, silently
-replacing what they just typed is the single most user-hostile thing sync can do. Local changes
-survive the pull and are resolved by the push, which is where the real decision happens.
+If someone edits a shift on this phone and a copy arrives from the server, silently replacing what
+they just typed is the single most user-hostile thing sync can do. So local content survives the
+pull.
 
-Note that this rule only _defers_; it never determines the final state. See the convergence
-walkthrough below.
+**Adopting `R.updated_at` as the new base is not bookkeeping — it is the conflict policy.** By
+recording the version it has now seen, the row earns the right to overwrite it: the next push
+carries a base that matches, so it succeeds. A locally changed row can only ever overwrite a
+server version it has observed.
+
+That single line is what makes the policy read-before-write last-write-wins rather than
+first-writer-wins. See [Conflict resolution](#conflict-resolution).
 
 ## Push
 
@@ -117,9 +132,9 @@ walkthrough below.
 
 ### Why optimistic concurrency rather than blind last-write-wins
 
-Blind LWW would be simpler and would be _fine_ almost always, given a single writer. The reason
-to spend a field on it: blind LWW cannot tell the difference between a normal write and one
-device silently clobbering another's newer edit. Detection is what lets us keep the losing
+Blind LWW would be simpler and would be _fine_ almost always, given one person editing from one
+device at a time. The reason to spend a field on it: blind LWW cannot tell the difference between
+a normal write and one device silently clobbering another's newer edit. Detection is what lets us keep the losing
 version instead of destroying it, which is what principle 1 requires. The cost is one field on
 the wire.
 
@@ -131,18 +146,33 @@ rejected as a conflict and reconciled. No request ids or dedup table needed.
 
 ## Conflict resolution
 
-**The rule is: the first writer to reach the server wins. The second writer adopts the server's
-version, and its own version is preserved in `sync_conflicts`.**
+**Last write wins — but a write must be preceded by observing the version it overwrites.**
 
-That is the whole rule. There is no special handling for deletes, because a soft delete is an
-ordinary field change and the optimistic-concurrency check resolves it identically.
+A locally changed row may overwrite the current server version only after it has _seen_ that
+version and adopted it as its base. That is what the pull step does, and it is why the base check
+on push then succeeds.
 
-| Situation                                  | Resolution                                    |
-| ------------------------------------------ | --------------------------------------------- |
-| Clean local row, remote change             | Remote wins                                   |
-| Locally-changed row, remote change on pull | Deferred — local kept until push decides      |
-| Push with matching base                    | Local wins; becomes the new server version    |
-| Push with stale base                       | Server wins; local version → `sync_conflicts` |
+So optimistic concurrency is not choosing the winner. It is preventing a **blind** overwrite by a
+device that has not seen current state. Once a device has pulled, it may overwrite — and in
+practice **the device that completes a sync cycle last is the one whose version survives.**
+
+That is good behaviour here rather than a compromise: sync runs on foreground, so the last device
+to sync is almost always the last device the person actually used, which is almost always the
+edit they meant to keep.
+
+There is no special handling for deletes. A soft delete is an ordinary field change and the same
+rules resolve it.
+
+| Situation                                  | Resolution                                                 |
+| ------------------------------------------ | ---------------------------------------------------------- |
+| Clean local row, remote change             | Remote wins                                                |
+| Locally-changed row, remote change on pull | Local content kept, remote version adopted as the new base |
+| Push with matching base                    | Local wins; becomes the new server version                 |
+| Push with stale base                       | Server wins; local version → `sync_conflicts`              |
+
+The last row is now **rare**. Because pull refreshes the base of a locally changed row, a stale
+base is only reachable when the server moves in the window _between_ this device's pull and its
+push — a genuine race with another device. It is not the ordinary conflict path.
 
 ### Convergence
 
@@ -172,10 +202,18 @@ Final: **deleted**, on A, B, and the server.
 
 Final: **row exists as `X`**, on A, B, and the server.
 
-Both orders converge: every replica agrees, and no version was destroyed — the loser of each
-step is in `sync_conflicts`. The outcome differs by ordering, which is inherent to
-last-write-wins and acceptable here. What matters is that it is deterministic given an ordering,
-and that it terminates.
+**Note what the two cases have in common.** In Case 1 the device that pushed first was A, and the
+final state is B's. In Case 2 it was B, and the final state is A's. **In both orderings the device
+that completes a sync cycle second is the one whose version survives** — because pulling refreshed
+its base, which is precisely what licenses it to overwrite.
+
+Both orders converge: every replica agrees, and no version was destroyed — the loser of each step
+is in `sync_conflicts`. The outcome differs by ordering, which is inherent to last-write-wins and
+acceptable here.
+
+**It also terminates.** A row at `synced` is never pushed, so once editing stops, one further
+cycle on each device brings every replica to the same version and the exchange ends. Continued
+back-and-forth requires continued editing.
 
 ### Why the asymmetric delete rule was removed
 
@@ -244,8 +282,21 @@ otherwise be: signing in with Google on a user who has already linked Google res
 _same_ user id, so it is not a mismatch at all. What remains is a real second account — someone
 else's phone, or a second identity that was never linked.
 
-Resolving it requires an explicit choice from the user: keep the existing local data and adopt
-it into the new account, or delete it. Never silently merge.
+**There is no adoption path.** Local records are never moved into a different account, with or
+without confirmation. The two safe exits are:
+
+1. **Sign out and use the original account.** Non-destructive, and the right answer almost every
+   time.
+2. **Delete the local data and start fresh with this account.** Destructive, and requires explicit
+   confirmation.
+
+Adoption was considered and rejected. The failure it risks is the worst one this app has —
+uploading one person's income records into another person's cloud account, irreversibly — and the
+moment it would be offered is exactly when someone is confused about which account they are in.
+Family devices, second Apple IDs and hand-me-down phones all produce this state.
+
+If moving records between accounts is ever genuinely needed, it should be a deliberately designed
+feature — most naturally export, sign in, import — and not a branch inside the sign-in flow.
 
 ### Signing in to an account with no records
 
@@ -258,9 +309,12 @@ backup. If you have used a different sign-in before, try that one instead."_ Upl
 optimistically is what turns a recoverable wrong-provider tap into two divergent cloud histories,
 and [ADR-020](DECISIONS.md#adr-020) does not support merging those.
 
-### Losing Pro
+### Losing Pro — sync behaviour
 
-Sync stops. Local data is untouched and export stays available. Rows that change go to
+Scoped to sync only. What else Pro gating does or doesn't restrict is a product question and is
+not settled here — see [PRODUCT.md](PRODUCT.md).
+
+Sync stops. Local records are untouched and export stays available. Rows that change go to
 `modified` and are simply not transmitted; they are sent if the subscription resumes. Nothing is
 deleted locally or remotely.
 
@@ -279,12 +333,31 @@ pass, because the set to push is already correct.
 | Trigger             | Behaviour                                    |
 | ------------------- | -------------------------------------------- |
 | App foreground      | Full cycle: pull, then push                  |
+| App backgrounded    | Push                                         |
 | Local write         | Push, debounced 5s, coalesced                |
 | Network regained    | Full cycle                                   |
 | Manual, in Settings | Full cycle, with visible progress and result |
-| Periodic background | Deferred — `expo-background-task` post-v1    |
+| Periodic background | Optional optimisation — see below            |
 
 Only one cycle runs at a time; overlapping triggers coalesce into the running cycle.
+
+### What these triggers do and don't cover
+
+They cover the ordinary case completely: a shift logged with a connection is replicated within
+seconds, and one logged offline is replicated the moment connectivity returns or the app is next
+opened or backgrounded.
+
+**The gap is a shift logged offline where the app is never opened again before the device is
+lost.** That record is not backed up. This should be stated honestly rather than described as
+continuous backup.
+
+**Periodic background execution does not reliably close that gap**, which is why it is an
+optimisation and not something the promise rests on. iOS grants `BGAppRefreshTask` windows based
+on usage patterns, so an app that has not been opened for a week receives few or none — it is
+least reliable in precisely the situation where it would matter. Android is more permissive but
+subject to Doze and vendor battery management.
+
+Adding it later narrows the window. It does not change what we can honestly claim.
 
 ## Errors and retry
 
@@ -296,8 +369,8 @@ Only one cycle runs at a time; overlapping triggers coalesce into the running cy
 | Account mismatch | Signed-in account ≠ `local_account` | Stop; require an explicit user decision                  |
 | Permanent        | 4xx, schema mismatch, bad payload   | Stop the cycle, report to telemetry, surface in Settings |
 
-Sync failure is **never a blocking or modal error**. The user's data is already durable
-locally, so a failed sync is a background condition, not an interruption. It surfaces as state
+Sync failure is **never a blocking or modal error**. The local record remains available, so a
+failed sync is a background condition, not an interruption. It surfaces as state
 in Settings ("Last synced 2 hours ago"), and the only failures worth actively interrupting for
 are an expired session and an account mismatch, because both need a human.
 

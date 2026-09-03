@@ -9,10 +9,15 @@
  * translated into `SyncError` at the adapter edge.
  */
 
-/** Tables that replicate. Local-only tables (`local_account`, `sync_state`, …) are absent. */
-export type SyncTableName = 'jobs' | 'shifts' | 'tip_entries';
+/**
+ * Tables that replicate.
+ *
+ * Local-only tables — `local_account`, `sync_state`, `sync_conflicts`, `settings` — are absent,
+ * as are the underscore-prefixed columns on syncable rows. See docs/SYNC.md § What syncs.
+ */
+export type SyncTableName = 'jobs' | 'shifts' | 'expenses';
 
-export const SYNC_TABLES: readonly SyncTableName[] = ['jobs', 'shifts', 'tip_entries'];
+export const SYNC_TABLES: readonly SyncTableName[] = ['jobs', 'shifts', 'expenses'];
 
 /** Rows are pulled and pushed in pages of this size. */
 export const SYNC_PAGE_SIZE = 500;

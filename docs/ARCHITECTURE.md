@@ -17,8 +17,9 @@ and car parks. It also introduces latency into the one interaction that has to f
 data the user already owns.
 
 The cost of local-first is that we must write a sync protocol. That cost is real but bounded,
-because IND's data is close to the easiest case sync has: single-writer, small rows,
-append-mostly, no collaborative editing. See [SYNC.md](SYNC.md).
+because IND's data is close to the easiest case sync has: one person's data, never shared, small
+rows, append-mostly, and edited concurrently only when that same person uses two devices inside
+one sync window. See [SYNC.md](SYNC.md).
 
 ## Layers and the dependency rule
 
@@ -31,7 +32,7 @@ append-mostly, no collaborative editing. See [SYNC.md](SYNC.md).
 │  data/         repositories, local DB, sync engine, ports   │
 ├─────────────────────────────────────────────────────────────┤
 │  domain/       pure TypeScript — entities, money, time,     │
-│                pay rules. No I/O of any kind.               │
+│                earnings. No I/O of any kind.                │
 └─────────────────────────────────────────────────────────────┘
          dependencies point downward, never upward
 ```
@@ -43,8 +44,8 @@ restriction below.
 ### `domain/` is pure, and this is enforced
 
 `domain/` contains the logic that is genuinely hard to get right and genuinely expensive to get
-wrong: money arithmetic, time and duration arithmetic, pay-rule evaluation, and the entity
-types themselves.
+wrong: money arithmetic, time and duration arithmetic, what a shift earned, and the entity types
+themselves.
 
 It imports **nothing** from `react`, `react-native`, `expo-*`, `drizzle-orm`, `@supabase/*`, or
 any other layer. It is plain TypeScript that would run in Node, in a browser, or on a server
@@ -56,9 +57,9 @@ good intentions. Two reasons it matters:
 1. **Testability.** The riskiest logic in IND runs as fast unit tests with no simulator, no
    database, and no mocking. That is the difference between a test suite that gets run and one
    that doesn't.
-2. **Reuse without a monorepo.** If a server-side validator, a web surface, or a watch app ever
-   needs the same pay-period or tip-split math, `domain/` lifts out to a package with no
-   untangling. We are not building that today, but we are not foreclosing it either.
+2. **Longevity.** Money and time logic outlives React Native versions, navigation libraries and
+   ORMs. Keeping it free of framework imports means an SDK upgrade or a library swap cannot
+   break the part that is most expensive to get right.
 
 ## The backend boundary
 
@@ -112,17 +113,23 @@ src/
     settings/
 
   features/                     one directory per feature area
-    shifts/                       components/, hooks/, screens live beside each other
+    shifts/                       logging, editing, and (Pro) scheduling a shift
     jobs/
-    earnings/
+    earnings/                     tonight, week, month and year totals
+    calendar/                     completed shifts, plus scheduled ones for Pro
+    insights/                     trends and job comparisons
+    expenses/
+    journal/                      reading shift notes back (Pro)
+    tax/                          set-aside settings and targets (Pro)
     account/                      sign-in, account state, entitlement UI
     export/                       CSV/JSON export — free tier, unrestricted
 
   domain/                       PURE. No React, no RN, no I/O. Fully unit tested.
-    money/                        minor-unit arithmetic, allocation, formatting inputs
+    money/                        minor-unit arithmetic, formatting inputs
     time/                         instants, business dates, durations, DST-safe math
-    pay/                          pay rules, overtime, pay periods, tip-outs
-    entities/                     Job, Shift, TipEntry, PayPeriod — types and invariants
+    earnings/                     hours × rate, tips, tip-out, effective hourly
+    tax/                          which earnings are included, and the set-aside target
+    entities/                     Job, Shift, Expense — types and invariants
 
   data/
     db/
@@ -138,6 +145,11 @@ src/
       adapters/
         supabase/                 the ONLY place @supabase/* is imported
         fake/                     in-memory transport for tests
+    calendar/
+      ports.ts                    CalendarPort — read and write external calendar events
+      adapters/
+        eventkit/                 Apple Calendar
+        google/                   Google Calendar
 
   ui/                           design-system primitives: Text, Button, Screen, Card, Field
   theme/                        semantic tokens over PlatformColor / HIG palette
@@ -167,6 +179,35 @@ never a Drizzle query builder directly. This keeps query patterns reviewable in 
 means sync bookkeeping columns (see [SYNC.md](SYNC.md)) are maintained centrally rather than
 being every caller's responsibility to remember.
 
+**Scheduling lives in `shifts/`, not its own feature.** Scheduled and worked are states of the
+same shift, so scheduling is a way of creating one; `calendar/` is a view over shifts rather than
+a separate model. This gets its own boundary only if the implementation ever genuinely demands
+one.
+
+**External calendars sit behind a port, like the backend does.** `data/calendar/` exposes a
+`CalendarPort` with EventKit and Google adapters, for the same reason `data/sync/` does: two
+vendor implementations, neither of which should leak upward, and one of them needs a permission
+prompt that features shouldn't know about. IND's own scheduling model stays the source of truth
+— external calendars are something we import from and export to.
+
+**Promote to shared at two.** A component or hook stays inside its feature until a second feature
+needs it, then moves to `ui/` or `domain/` deliberately. Promoting on first use produces a shared
+bucket nobody can safely change; never promoting produces silent duplication.
+
+### Where this structure comes from
+
+Routing follows expo-router's conventions, which mirror the Next.js App Router — `_layout.tsx`,
+`(tabs)` route groups, `[id]` dynamic segments. A thin routing layer over feature-area
+colocation is the current community consensus for Expo apps.
+
+Worth knowing: **neither React nor Next.js prescribes a project structure** beyond routing files,
+and both say so explicitly. There is no official layout to conform to, so the rest is a choice.
+
+`domain/` and `data/` are a deliberate departure from the common template, which puts
+`components/`, `hooks/`, `store/` and `utils/` at the top level. Ports-and-adapters is not a
+React convention. It is chosen here because money and time arithmetic is where this app can
+actually cost someone money, and that logic is worth isolating from the framework around it.
+
 ## Data flow
 
 **Read.** Feature hook → repository → Drizzle `useLiveQuery` against local SQLite. Queries
@@ -175,27 +216,29 @@ engine. No cache layer, no invalidation, no `TanStack Query` — there is no ser
 path.
 
 **Write.** Feature → repository → local SQLite transaction. The write is durable and visible
-immediately. The repository marks the row pending for sync. The UI does not wait for, or know
-about, anything remote.
+immediately. The repository records the row's replication state. The UI does not wait for, or
+know about, anything remote.
 
 **Sync.** The engine runs on app foreground, on network regain, and debounced after local
 writes. It pulls remote changes, reconciles, and pushes pending local rows. Every stage is
 resumable and idempotent. Failures are logged and retried; they never surface as a blocking
-error, because the user's data is already safe locally.
+error, because local records remain available.
 
-**Entitlement.** The sync engine is gated on an active Pro entitlement. Free users accumulate
-pending rows that are never sent — the local database behaves identically either way, which is
-what makes the tier a single check rather than a second code path.
+**Entitlement.** The sync engine is gated on an active Pro entitlement. Free users' rows stay
+`local_only`, which states a fact rather than describing a queue: nothing is scheduled, retrying,
+or waiting. The local database behaves identically either way, so the tier is one boolean at one
+call site rather than a second code path — and turning sync on becomes a single metadata write
+instead of a pass over someone's entire history at the moment they have just paid.
 
 ## Testing strategy
 
-| Layer        | Approach                                                                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `domain/`    | Exhaustive unit tests. Money, DST boundaries, overnight shifts, pay periods, tip allocation. This is where the bugs that cost people money live. |
-| `data/db/`   | Repository tests against an in-memory SQLite database, including migration tests that assert old databases upgrade correctly.                    |
-| `data/sync/` | Protocol tests against `FakeTransport` — offline edits, conflicts, interrupted syncs, resumed cursors, purge-window expiry. No network.          |
-| `features/`  | React Native Testing Library for interaction behaviour, kept light.                                                                              |
-| E2E          | Maestro for the handful of flows that must never break: log a shift, sign in, export data.                                                       |
+| Layer        | Approach                                                                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `domain/`    | Exhaustive unit tests. Money, DST boundaries, overnight shifts, earnings and effective hourly, tip-out subtraction. This is where the bugs that cost people money live. |
+| `data/db/`   | Repository tests against an in-memory SQLite database, including migration tests that assert old databases upgrade correctly.                                           |
+| `data/sync/` | Protocol tests against `FakeTransport` — offline edits, conflicts, interrupted syncs, resumed cursors, purge-window expiry. No network.                                 |
+| `features/`  | React Native Testing Library for interaction behaviour, kept light.                                                                                                     |
+| E2E          | Maestro for the handful of flows that must never break: log a shift, sign in, export data.                                                                              |
 
 Migration tests deserve specific mention: an app that records financial history cannot ship a
 migration that loses or corrupts rows. Every migration gets a test that seeds the previous

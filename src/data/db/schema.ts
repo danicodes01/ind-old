@@ -1,15 +1,17 @@
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+import { check, index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 /**
- * Columns every syncable table carries, from migration 001. See docs/DATA-MODEL.md.
+ * Columns every syncable table carries. See docs/DATA-MODEL.md.
  *
- * Included now rather than when sync ships because retrofitting ordering and replication
- * columns onto tables already holding real financial records is a risky migration, while
- * adding them on day one is nearly free. See ADR-005.
+ * Present from the first migration. Sync ships in the initial product for Pro, so they are in
+ * use immediately; for free users they sit at `local_only` and stay there. Either way,
+ * retrofitting ordering and replication columns onto tables already holding real financial
+ * records would be a risky migration for no reason. See ADR-005.
  *
  * Note there is no `user_id`. Identity lives once in `local_account`, never on domain rows —
- * an installation holds one account's data, and the server derives the owner from the
- * verified JWT rather than trusting the client. See ADR-016.
+ * an installation holds one account's data, and the server derives the owner from the verified
+ * JWT rather than trusting the client. See ADR-016.
  */
 const syncable = {
   /** UUIDv7 minted on the client. Time-ordered, so it indexes with locality. */
@@ -37,11 +39,12 @@ const syncable = {
 };
 
 /**
- * An employer or gig platform.
+ * An employer or gig platform. Created with three things: name, hourly rate, colour.
  *
- * Pay rules live here rather than in settings because two jobs routinely disagree — the week
- * boundary that overtime is measured against is a property of the employer, not the user or
- * the locale. See ADR-008.
+ * There is deliberately no pay-period, overtime, or business-day configuration here. IND records
+ * what someone worked and made; it does not model what an employer owes. Wage earnings are
+ * worked time × the rate, which understates for anyone genuinely earning overtime — accepted,
+ * because a figure that disagrees with a real pay stub is worse than a simple one. See ADR-024.
  */
 export const jobs = sqliteTable(
   'jobs',
@@ -57,26 +60,16 @@ export const jobs = sqliteTable(
     /** Base hourly rate in minor units. Null for tips-only or commission work. */
     basePayMinor: integer('base_pay_minor'),
 
-    payPeriod: text('pay_period', {
-      enum: ['weekly', 'biweekly', 'semimonthly', 'monthly'],
-    }).notNull(),
-    /** A known period start, as YYYY-MM-DD. Biweekly periods are counted from here. */
-    payPeriodAnchor: text('pay_period_anchor'),
-
-    /** 0 = Sunday. The boundary weekly overtime is measured against. */
-    weekStartsOn: integer('week_starts_on').notNull().default(0),
-    /** Hour at which a new business day begins, 0-23. Commonly 4 or 5 in hospitality. */
-    dayStartHour: integer('day_start_hour').notNull().default(0),
-
-    overtimeDailyMinutes: integer('overtime_daily_minutes'),
-    overtimeWeeklyMinutes: integer('overtime_weekly_minutes'),
     /**
-     * Overtime multiplier in basis points — 15000 is 1.5x.
+     * Tax setup, both nullable where null means **not answered**.
      *
-     * An integer for the same reason money is: a float multiplier reintroduces exactly the
-     * representation error the money layer exists to avoid. See ADR-007.
+     * Two factual questions — "does this job take taxes out of your pay?" and "are your tips
+     * already included in what's taken out?" — whose answers decide which earnings are included
+     * in the set-aside calculation. IND makes no determination about anyone's legal tax status,
+     * and a job with either field unanswered is excluded and surfaced as needing setup.
      */
-    overtimeRateBasisPoints: integer('overtime_rate_basis_points'),
+    withholdsTax: integer('withholds_tax'),
+    tipsCovered: integer('tips_covered'),
 
     isActive: integer('is_active').notNull().default(1),
     sortOrder: integer('sort_order').notNull().default(0),
@@ -85,11 +78,14 @@ export const jobs = sqliteTable(
 );
 
 /**
- * One worked shift.
+ * One shift, scheduled or worked.
  *
- * The four time columns are all stored because none is derivable from the others: instants
- * answer how long it took, `work_date` answers which business day it belongs to, and `tz`
- * is what makes the wall clock renderable years later. See ADR-008.
+ * Scheduling is a Pro feature; the free tier only ever creates rows with `status = 'worked'`.
+ *
+ * Scheduled times always describe the plan and actual times always describe what happened —
+ * neither pair is ever overloaded to stand in for the other. That also makes a class of bug
+ * structurally impossible: an earnings query that forgets to filter on `status` finds no actual
+ * times on a scheduled shift, so there is nothing to miscount as income. See ADR-008.
  */
 export const shifts = sqliteTable(
   'shifts',
@@ -100,12 +96,22 @@ export const shifts = sqliteTable(
       .notNull()
       .references(() => jobs.id),
 
-    /** Epoch ms UTC. Durations are computed from these and never from wall-clock values. */
-    startedAt: integer('started_at').notNull(),
-    /** Epoch ms UTC. Null while a shift is still running. May fall on the next calendar day. */
+    status: text('status', { enum: ['scheduled', 'worked', 'cancelled'] })
+      .notNull()
+      .default('worked'),
+
+    /** The plan. Set when a shift is scheduled, never overwritten by what happened. */
+    scheduledStartAt: integer('scheduled_start_at'),
+    scheduledEndAt: integer('scheduled_end_at'),
+
+    /** What happened. Epoch ms UTC. Null until worked; end is null while in progress. */
+    startedAt: integer('started_at'),
     endedAt: integer('ended_at'),
 
-    /** The business day, YYYY-MM-DD. A human judgement, defaulted then owned by the user. */
+    /** Links instances materialised from one recurrence pattern. See ADR-025. */
+    seriesId: text('series_id'),
+
+    /** Business day, YYYY-MM-DD. Defaulted from where the shift starts, then owned by the user. */
     workDate: text('work_date').notNull(),
     /** IANA zone at the time and place of work. Stored per shift because people travel. */
     tz: text('tz').notNull(),
@@ -113,57 +119,90 @@ export const shifts = sqliteTable(
     /** Unpaid break, subtracted from paid time. */
     breakMinutes: integer('break_minutes').notNull().default(0),
 
-    /** Rate override in minor units when this shift was not paid at the job's base rate. */
+    /**
+     * The hourly rate for this shift, when it differs from the job's — a training rate, a
+     * holiday rate, a different position covered for one night.
+     *
+     * An hourly rate, not a total: explicitly not an override of calculated wages, and not an
+     * overtime or payroll mechanism.
+     */
     payRateMinorOverride: integer('pay_rate_minor_override'),
 
+    /** Tips in minor units, in the job's currency. */
+    tipsCashMinor: integer('tips_cash_minor').notNull().default(0),
+    tipsCardMinor: integer('tips_card_minor').notNull().default(0),
+    tipsOtherMinor: integer('tips_other_minor').notNull().default(0),
+    /** What was paid out to bar, bussers, kitchen. Subtract to get what was kept. */
+    tipOutMinor: integer('tip_out_minor').notNull().default(0),
+
+    /** The shift journal. Free text, read back across shifts by the Pro journal view. */
     note: text('note'),
+    /** Optional 1–5 marker recorded beside the note. */
+    feeling: integer('feeling'),
+
+    /**
+     * Link to an event in this device's Apple or Google calendar.
+     *
+     * **Local-only and never synced.** EventKit identifiers are scoped to a single device's
+     * calendar store, so replicating them would cause silent mismatches and duplicate imports.
+     * See ADR-025.
+     */
+    externalEventId: text('_external_event_id'),
+    externalCalendar: text('_external_calendar'),
   },
   (table) => [
+    /**
+     * A shift must have a plan, an actual, or both. Satisfied by every valid state: scheduled
+     * (plan only), worked (actual only), scheduled-then-worked (both), and cancelled (plan
+     * retained). Only a row with neither is rejected.
+     *
+     * The tighter per-status rules live in the repository, where they are readable.
+     */
+    check(
+      'shifts_has_a_time',
+      sql`${table.scheduledStartAt} IS NOT NULL OR ${table.startedAt} IS NOT NULL`,
+    ),
     index('shifts_job_idx').on(table.jobId),
     index('shifts_work_date_idx').on(table.workDate),
+    index('shifts_status_idx').on(table.status),
     index('shifts_started_at_idx').on(table.startedAt),
+    index('shifts_series_idx').on(table.seriesId),
     index('shifts_sync_state_idx').on(table.syncState),
   ],
 );
 
 /**
- * Tips recorded against a shift.
- *
- * A separate table rather than columns on `shifts` because one shift routinely produces
- * several tips of different kinds, which are taxed and reported differently and which people
- * track separately. Flattening them would force a schema change the first time someone needs
- * two.
+ * Simple work-expense tracking. Not bookkeeping.
  */
-export const tipEntries = sqliteTable(
-  'tip_entries',
+export const expenses = sqliteTable(
+  'expenses',
   {
     ...syncable,
 
-    shiftId: text('shift_id')
-      .notNull()
-      .references(() => shifts.id),
+    /** YYYY-MM-DD. An expense is a calendar-day concept, not an instant. */
+    date: text('date').notNull(),
 
-    kind: text('kind', { enum: ['cash', 'card', 'pooled', 'other'] }).notNull(),
-
-    /** Integer minor units. Never a float. See ADR-007. */
     amountMinor: integer('amount_minor').notNull(),
-    /** ISO 4217. Held per entry so travel and multi-country work are representable. */
     currency: text('currency').notNull(),
 
+    category: text('category'),
+    /** Not every expense belongs to one job. */
+    jobId: text('job_id').references(() => jobs.id),
     note: text('note'),
   },
   (table) => [
-    index('tip_entries_shift_idx').on(table.shiftId),
-    index('tip_entries_sync_state_idx').on(table.syncState),
+    index('expenses_date_idx').on(table.date),
+    index('expenses_job_idx').on(table.jobId),
+    index('expenses_sync_state_idx').on(table.syncState),
   ],
 );
 
 /**
  * The account this installation belongs to.
  *
- * One row, ever. Read only by the sync engine, which refuses to run when the signed-in
- * account does not match — two people's financial records are never silently merged.
- * Local-only: never replicated. See ADR-016.
+ * One row, ever. Read only by the sync engine, which refuses to run when the signed-in account
+ * does not match — two people's financial records are never merged, and there is no adoption
+ * path. Local-only: never replicated. See ADR-016.
  */
 export const localAccount = sqliteTable('local_account', {
   id: integer('id').primaryKey(),
@@ -183,9 +222,9 @@ export const syncCursors = sqliteTable('sync_state', {
 /**
  * Versions that lost a conflict, kept verbatim.
  *
- * Exists so that resolving a conflict never destroys anything. In normal operation this table
- * stays empty; a row in it is either a genuine two-device collision or evidence of a bug, and
- * either way the data is recoverable. Local-only.
+ * Exists so resolving a conflict never destroys anything. In normal operation this stays empty;
+ * a row in it is either a genuine two-device collision or evidence of a bug, and either way the
+ * data is recoverable. Local-only.
  */
 export const syncConflicts = sqliteTable('sync_conflicts', {
   id: text('id').primaryKey(),
@@ -196,17 +235,32 @@ export const syncConflicts = sqliteTable('sync_conflicts', {
 });
 
 /**
- * Device-level preferences and the cached entitlement.
- *
- * One row, ever. Local-only rather than syncable: these are properties of this installation,
- * and the entitlement is a cache of what the store reports, never a source of truth.
+ * Device preferences and the tax configuration. One row, ever. Local-only.
  */
 export const settings = sqliteTable('settings', {
   id: integer('id').primaryKey(),
   defaultJobId: text('default_job_id').references(() => jobs.id),
   /** BCP 47 tag overriding the device locale for formatting. Null follows the device. */
   localeOverride: text('locale_override'),
-  /** Cached Pro entitlement. Authoritative answer always comes from the store. */
+
+  /**
+   * Which day a week begins on, 0 = Sunday. App-wide rather than per job: weekly totals span
+   * every job, and three jobs with three week boundaries cannot be summed into "this week".
+   */
+  weekStartsOn: integer('week_starts_on').notNull().default(0),
+
+  /**
+   * Tax set-aside. The entire calculation is included earnings × `set_aside_percent_bp`.
+   *
+   * The percentage ships empty and is the user's own choice — IND explains what the setting does
+   * and does not suggest a number. There is no self-employment constant, no brackets, no
+   * deductions, and no liability or refund calculation anywhere. See ADR-024.
+   */
+  taxEnabled: integer('tax_enabled').notNull().default(0),
+  setAsidePercentBp: integer('set_aside_percent_bp'),
+  taxRemindersEnabled: integer('tax_reminders_enabled').notNull().default(0),
+
+  /** Cached Pro entitlement. The authoritative answer always comes from the store. See ADR-021. */
   proEntitlementCached: integer('pro_entitlement_cached').notNull().default(0),
   proEntitlementCheckedAt: integer('pro_entitlement_checked_at'),
 });
@@ -215,8 +269,8 @@ export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type Shift = typeof shifts.$inferSelect;
 export type NewShift = typeof shifts.$inferInsert;
-export type TipEntry = typeof tipEntries.$inferSelect;
-export type NewTipEntry = typeof tipEntries.$inferInsert;
+export type Expense = typeof expenses.$inferSelect;
+export type NewExpense = typeof expenses.$inferInsert;
 export type Settings = typeof settings.$inferSelect;
 export type LocalAccount = typeof localAccount.$inferSelect;
 export type SyncCursor = typeof syncCursors.$inferSelect;

@@ -46,22 +46,17 @@ export function workDateOf(year: number, month: number, day: number): WorkDate {
 }
 
 /**
- * Default the business day for a shift starting at `at` in `zone`.
+ * Default the business day for a shift starting at `at`, resolved in the shift's own zone.
  *
- * `dayStartHour` is the hour at which a new business day begins for this job — 0 for a
- * daytime job, commonly 4 or 5 for hospitality, so that a shift starting at 8pm and one
- * ending at 3am fall on the same business day. It is per-job configuration, never a locale
- * default, because it is a property of the employer.
+ * This is only the default. `work_date` is stored and owned by the user, because the default is
+ * not always right and only the person who worked it knows: clocking in at 8pm and out at 3am
+ * gives Saturday, which is what a bartender would call that night, but clocking in at 12:30am
+ * for the tail of the same night gives Sunday when they would say Saturday. That is a one-tap
+ * correction on a screen they are already on. See ADR-008.
  */
-export function workDateFor(at: Instant, zone: TimeZone, dayStartHour = 0): WorkDate {
-  invariant(
-    Number.isInteger(dayStartHour) && dayStartHour >= 0 && dayStartHour <= 23,
-    `dayStartHour must be an integer from 0 to 23, received ${dayStartHour}`,
-  );
-
+export function workDateFor(at: Instant, zone: TimeZone): WorkDate {
   const clock = wallClockAt(at, zone);
-  const candidate = workDateOf(clock.year, clock.month, clock.day);
-  return clock.hour < dayStartHour ? addDays(candidate, -1) : candidate;
+  return workDateOf(clock.year, clock.month, clock.day);
 }
 
 /**

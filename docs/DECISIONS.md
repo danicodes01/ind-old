@@ -1,10 +1,14 @@
 # IND — Architecture Decision Record
 
-Every significant technical choice, why it was made, and what it commits us to. Append new
-entries at the end; never rewrite history. If a decision is reversed, add a new ADR that
-supersedes the old one and mark the old one accordingly.
+Every significant technical choice, why it was made, and what it commits us to.
 
-All entries below were made during the foundation stage, before implementation.
+**Before first release**, this file describes the system we are building rather than the history
+of how we got here. Obsolete entries are rewritten or removed outright. Numbers are never reused,
+so a gap in the sequence means an entry was withdrawn.
+
+**After first release, that stops.** A superseded decision is preserved and marked superseded, and
+a new ADR records what replaced it — because from then on, the reasoning behind a shipped choice
+is something someone may need to recover.
 
 ---
 
@@ -36,8 +40,8 @@ people reach for it. It would also put every user's income data on a server as a
 the app working at all.
 
 **Consequences.** We must write and maintain a sync protocol ([SYNC.md](SYNC.md)). Accepted,
-because IND's data shape — single-writer, small rows, append-mostly, no collaborative editing —
-is the easiest case sync has.
+because IND's data shape — one person's data, never shared, small rows, append-mostly, with
+concurrent edits only across that same person's devices — is the easiest case sync has.
 
 ---
 
@@ -56,34 +60,36 @@ migration gets a test that seeds the prior schema, migrates, and asserts data su
 
 ---
 
-## ADR-004 — Accounts are free; Pro is cloud backup and sync
+## ADR-004 — Free tracks what happened; Pro manages your working life
 
-**Decision.** Anyone can create an account at no cost. Pro enables automatic cloud
-backup/restore and multi-device, cross-platform sync. Free users get unlimited local use and
-unrestricted export of all their data, forever. No account is required to use the app.
+**Decision.** Free is a complete tracker and requires no account and no sign-in of any kind:
+jobs, shifts, hours, breaks, tips and tip-outs, per-shift earnings, effective hourly rate, week
+and month and year totals, a calendar of completed shifts, job comparisons, basic insights,
+expenses, and unrestricted export — all fully offline.
 
-**Why.** Separating identity from entitlement keeps upgrade friction at one tap and avoids
-building a second identity path later. Unrestricted free export is what keeps charging for sync
-fair rather than coercive — we sell automation, not access to someone's own records. And no
-sign-up wall, because utility apps lose most of their users at a login screen.
+Pro adds four things: cloud backup and cross-device sync, scheduling, the shift journal, and tax
+tools.
 
-**Consequences.** A free signed-in account is an identity that syncs nothing, which is an easy
-thing for UI to misrepresent — it must never imply backup. The most compelling paid feature is
-now sync, so other Pro value (insights, reports, tax exports) is an open product question.
+**Why.** Free has to be genuinely useful forever, not a crippled trial, or none of the trust this
+app depends on is available to us. Unrestricted export is the specific thing that keeps charging
+fair rather than coercive: we sell automation and convenience, never access to someone's own
+records. And there is no sign-up wall, because utility apps lose most of their users at a login
+screen and you cannot earn the trust of someone who never got in.
 
-**Amended by [ADR-019](#adr-019).** "Anyone can create an account" overstated it. Account
-creation is never offered as a user-facing action at all; the internal user is created as a side
-effect of turning on backup. Free use involves no authentication whatsoever. The signed-in-
-without-Pro state still exists, but only transiently, as part of the restore flow.
+**Consequences.** Pro is four distinct capabilities rather than one, so no single feature has to
+carry the upgrade on its own. Free users never encounter authentication, which means the account
+model has to be built so it is invisible until someone opts into backup — see
+[ADR-019](#adr-019). Every Pro feature must degrade honestly when an entitlement lapses: sync
+stops, records and export remain untouched.
 
 ---
 
-## ADR-005 — Durability is the product, so the server is committed
+## ADR-005 — The server is committed
 
 **Decision.** A backend is a planned, committed part of the architecture, not a hedge. The sync
-path is designed from migration 001 rather than retrofitted.
+path is designed into the first migration rather than retrofitted.
 
-**Why.** Recorded verbatim, because it is the reasoning that drove the decision:
+**Why.** Recorded verbatim, because it is the reasoning that put a server in the plan:
 
 > For a financial tracker, "never lose your records" and "it's on my iPad too" is probably the
 > most compelling thing you could charge for. More compelling than extra charts. If that's what
@@ -91,12 +97,16 @@ path is designed from migration 001 rather than retrofitted.
 
 Losing years of someone's income records because they dropped their phone is a product failure
 whether or not they ever paid. OS-level backup (iCloud, Android Auto Backup) covers some of this
-incidentally, but fails exactly where it hurts — full iCloud storage, cross-platform moves,
-stale snapshots — so it cannot be relied on.
+incidentally but fails exactly where it hurts — full iCloud storage, cross-platform moves, stale
+snapshots — so it cannot be relied on.
+
+**Scope.** Durability is one of Pro's four pillars, not a definition of the product. Pro is also
+scheduling, the shift journal, and tax tools ([ADR-004](#adr-004)). This ADR commits us to the
+server and to sync-readiness; it does not claim backup is the only reason anyone would pay.
 
 **Consequences.** Sync-readiness is a hard requirement of the initial schema: UUIDv7 ids,
-server-assigned `updated_at`, soft deletes, per-row pending state. These cost little now and
-would be a risky migration later.
+server-assigned `updated_at`, soft deletes, and per-row replication state. These cost little at
+the start and would be a risky migration later.
 
 ---
 
@@ -107,10 +117,10 @@ would be a risky migration later.
 a local `sync_conflicts` table rather than discarded. Keyset pagination on `(updated_at, id)`.
 Full specification in [SYNC.md](SYNC.md).
 
-**Why.** LWW is genuinely correct for single-writer data rather than a shortcut — but only if
-nothing is silently destroyed. Optimistic concurrency is what makes a clobber _detectable_,
-which is what allows the losing version to be kept. CRDTs and operational transforms would be
-substantial complexity for a problem this data shape doesn't have.
+**Why.** LWW is genuinely correct for one person's unshared data rather than a shortcut — but
+only if nothing is silently destroyed. Optimistic concurrency is what makes a clobber
+_detectable_, which is what allows the losing version to be kept. CRDTs and operational
+transforms would be substantial complexity for a problem this data shape doesn't have.
 
 **Consequences.** One extra field on the wire and one extra local table. Device clocks are never
 trusted for ordering — `updated_at` is always assigned by Postgres. Soft-deleted rows purge
@@ -124,8 +134,11 @@ consults such a rule: the optimistic-concurrency base check decides the outcome 
 delete-versus-edit reasoning applies, and the pull-side "keep local" step only defers the
 decision. The rule described an intent the mechanism did not implement.
 
-The operative rule is simply **first writer to reach the server wins; the second adopts the
-server version and its own is preserved in `sync_conflicts`**. Both orderings were walked and
+The operative rule is **last write wins, where a write must be preceded by observing the version
+it overwrites**. Pulling refreshes a locally changed row's base, which is what licenses its next
+push to succeed — so in practice the device that completes a sync cycle _last_ is the one whose
+version survives. Optimistic concurrency is not choosing the winner; it prevents a **blind**
+overwrite by a device that has not seen current state. Both orderings were walked and
 converge — see [SYNC.md](SYNC.md#convergence), where the proof is recorded and is a required
 test case. Implementing the asymmetry for real would need a re-push-as-undelete round trip and
 would let a stale edit on a forgotten device silently revive a deliberately deleted record.
@@ -137,12 +150,13 @@ Since neither version is destroyed either way, the simpler rule wins.
 
 **Decision.** All monetary values are `{ amount_minor: integer, currency: ISO-4217 }`. No
 floating point anywhere in storage, arithmetic, or transport. The minor-unit exponent is a
-per-currency property, never a hardcoded 100. Division uses largest-remainder allocation with a
-guarantee that parts sum exactly to the original. Aggregation never crosses currencies.
+per-currency property, never a hardcoded 100. Aggregation never crosses currencies.
 
-**Why.** `0.1 + 0.2 !== 0.3`, and that error compounds across a year of shift totals. These
-numbers may end up on a tax return. Tip pooling and tip-outs make division routine, and naive
-division loses or invents cents. Not every currency has two decimal places.
+**Why.** `0.1 + 0.2 !== 0.3`, and that error compounds across a year of shift totals. IND's whole
+purpose is telling someone what they actually earned, and they check that against cash they
+physically counted — a total off by a few cents reads as the app being broken. Not every currency
+has two decimal places, either, so a hardcoded 100 is wrong by two orders of magnitude for a
+Japanese or Kuwaiti user.
 
 **Consequences.** `domain/money` is the only representation of money in the codebase; a bare
 `number` amount is a bug. Mixed-currency periods display separate totals rather than one wrong
@@ -150,22 +164,29 @@ number, until there is a product answer for exchange rates.
 
 ---
 
-## ADR-008 — Time: instants, business date, and IANA zone stored separately
+## ADR-008 — Time: instants, work date, and IANA zone stored separately
 
-**Decision.** Every shift stores `started_at` and `ended_at` as epoch-ms UTC instants, a
-`work_date` business day, and an IANA `tz`. Durations are computed from instants only; wall-clock
-values are for display only, resolved through `tz`. Week starts and pay periods are per-job
-configuration.
+**Decision.** Every shift stores its actual `started_at` and `ended_at` as epoch-ms UTC instants,
+a `work_date`, and an IANA `tz`. Durations are computed from instants only; wall-clock values are
+for display, resolved through `tz`. `work_date` is defaulted from the calendar date the shift
+actually starts and is then owned by the user. `week_starts_on` is a single app-wide preference,
+not per-job configuration.
 
-**Why.** None of the four is derivable from the others. "Which day's shift is this" is a human
-judgement — a bartender clocking out at 3am means the previous night — and deriving it from
-either timestamp breaks for overnight or split shifts. Timezone must be per-shift because people
-travel; the zone rather than the offset, because offsets change and zones don't. And a shift
-across the spring-forward boundary is seven hours, not eight — people get paid for elapsed time.
+**Why.** None of these is derivable from the others. Instants are unambiguous, so they are the
+only safe basis for duration — a shift across the spring-forward boundary is seven hours, not
+eight, and people are paid for time that actually elapsed. Timezone is stored per shift because
+people travel and relocate, and the zone rather than the offset because offsets change and zones
+don't. `work_date` is stored because the default is not always right: clocking in at 12:30am for
+the tail of Saturday night defaults to Sunday, and only the person who worked it knows.
 
-**Consequences.** `domain/time` is the only place duration arithmetic is written. Computing a
-duration by subtracting local times is a bug. Overtime and pay-period logic reads its boundaries
-from the job, never from the locale.
+Week start moved off the job because its only per-job justification was overtime calculation,
+which IND does not do. Weekly totals span every job, and three jobs with three week boundaries
+cannot be summed into "this week."
+
+**Consequences.** `domain/time` is the only place duration arithmetic is written; computing a
+duration by subtracting local times is a bug. `started_at` and `ended_at` always and only mean
+what actually happened — the plan lives in `scheduled_start_at` / `scheduled_end_at`, and neither
+pair is ever overloaded to stand in for the other.
 
 ---
 
@@ -200,25 +221,6 @@ narrow enough — two interfaces, six methods — that the indirection is nearly
 translated into our own `SyncError` taxonomy at the adapter edge. A `FakeTransport` implementing
 the same interface makes the protocol testable with no network. Replacing Supabase means writing
 one adapter directory and changing nothing else.
-
----
-
-## ADR-011 — In-app purchase implementation deferred
-
-**Decision.** No purchase SDK is installed during the foundation stage. The decision between
-StoreKit 2 via `expo-iap`/`react-native-iap` and RevenueCat is deferred until there are products
-to sell.
-
-**Why.** StoreKit 2 verifies transactions cryptographically on-device with no server, so a
-purchase SDK does not require a backend — the "you need RevenueCat or a server" framing is out
-of date. RevenueCat's value is the subscription edge cases (grace periods, billing retry,
-proration, refunds, cross-platform entitlement) and it costs roughly 1% of tracked revenue above
-a free threshold. Installing either now would mean a dependency pointed at nothing.
-
-**Consequences.** Entitlement is read through a single call site so that either implementation
-drops in without touching feature code. Android's local verification is weaker than iOS's; if
-piracy becomes a real concern, server-side validation is the answer. Current RevenueCat pricing
-should be re-checked before deciding.
 
 ---
 
@@ -280,10 +282,11 @@ changes up for free.
 `drizzle-orm`, `@supabase/*`, or any other application layer. Enforced by ESLint
 `no-restricted-imports`, not convention.
 
-**Why.** The riskiest logic in IND — money arithmetic, DST-safe durations, pay rules — should
-run as fast unit tests with no simulator, no database, and no mocking. That is the difference
-between a test suite that gets run and one that doesn't. It also keeps `domain/` liftable into a
-shared package without untangling, which is what makes [ADR-009](#adr-009) safe.
+**Why.** The riskiest logic in IND — money arithmetic, DST-safe durations, what a shift earned —
+should run as fast unit tests with no simulator, no database, and no mocking. That is the
+difference between a test suite that gets run and one that doesn't. It also outlives the
+framework: money and time logic should survive an SDK upgrade or an ORM swap untouched, which it
+cannot do if it imports them.
 
 **Consequences.** Domain code takes primitives and returns values; anything needing I/O lives in
 `data/`. Enforced mechanically, so it cannot erode quietly.
@@ -453,22 +456,77 @@ typed token module.
 
 ## ADR-023 — Story flows for setup, one fast surface for logging
 
-**Decision.** One question per screen for onboarding, adding or editing a job, and other rare or
-complex flows. **Logging a shift is deliberately exempt**: it is a single screen that arrives
-mostly pre-filled, where the common case is confirming rather than filling in.
+**Decision.** One question per screen is reserved for flows where a question genuinely benefits
+from explanation or focused consideration — onboarding and tax setup. Everything else is a single
+screen. **Adding a job is one screen** (name, hourly rate, colour). **Logging a shift is one
+screen**, arriving mostly pre-filled, where the common case is confirming rather than filling in.
 
-**Why.** The two flows have opposite economics. Configuring a job — pay rate, pay period, week
-start, overtime threshold, tip-out rules — happens once and is genuinely complicated; as a form
-it is a wall of fields nobody reads, while one question at a time lets each carry the reason it
-is being asked. Logging a shift happens five nights a week, at 2am, one-handed and tired. Six
-screens for that is faithful to the pattern and fatal to the product: people stop logging, and an
-income record with gaps is worse than none because it misleads.
+**Why.** The pattern earns its place only where the question needs a reason attached. _"Does this
+job take taxes out of your pay?"_ is worth a screen, because the answer changes what IND counts
+and most people need a sentence explaining why they're being asked. _"What's this job called?"_
+is not — three fields across three screens is ceremony, and it makes a trivial task feel long.
 
-**Consequences.** Two interaction vocabularies coexist deliberately, and which one a flow gets is
-a design decision made per flow, not a default. Defaults matter disproportionately on the logging
-surface — last job used, business day derived from the job's day-start hour — because they are
-what turn filling in into confirming. No dropdowns anywhere; see [DESIGN.md](DESIGN.md) for the
-input rules and the accessibility floor.
+Logging a shift is the opposite case entirely: it happens five nights a week, at 2am, one-handed
+and tired. Splitting it across screens would be faithful to the pattern and fatal to the product,
+because people stop logging, and an income record with gaps is worse than none — it misleads.
+
+**Consequences.** Which vocabulary a flow gets is a design decision made per flow, never a
+default, and the bar for the story pattern is "does this question need a reason attached?"
+Defaults matter disproportionately on the logging surface — last job used, work date from when
+the shift started — because they are what turn filling in into confirming. No dropdowns anywhere;
+see [DESIGN.md](DESIGN.md) for the input rules and the accessibility floor.
+
+---
+
+## ADR-024 — IND is not payroll, accounting, or tax-filing software
+
+**Decision.** IND records what someone worked and made and helps them understand it. It never
+computes what an employer owes, never files anything, and connects to no external financial
+system — no IRS, no bank, no payroll provider, no employer reporting.
+
+Concretely, and these are the lines that were actually crossed at some point and pulled back:
+tip-out is **one number the user types in**, not a tip-pool allocation system. Overtime and
+pay-period configuration were **removed from the schema**, not left nullable. Tax tools are one
+multiplication by a percentage the user chose — no self-employment tax constant, no brackets, no
+deductions, no credits, no refund or amount-owed prediction.
+
+**Why.** Every app in this space drifts toward payroll, because each individual step looks
+reasonable and each one is small. The result is software that has to be right about employment
+law in fifty jurisdictions, and that produces numbers which must reconcile with a real pay stub
+or a real tax return. IND cannot be right about those things and should not imply it is.
+
+The wage figure is deliberately just worked time × rate, which **understates for anyone genuinely
+earning overtime**. That is the trade: a number that disagrees with someone's actual pay is worse
+than a number that is transparently a simple calculation.
+
+**Consequences.** Nullable payroll fields are not a compromise position — a nullable overtime
+threshold is an invitation to build the engine behind it, so those columns do not exist. Anything
+that would require IND to model employment or tax law is out of scope by default, and adding it
+means superseding this ADR rather than quietly extending a feature.
+
+---
+
+## ADR-025 — IND owns the scheduling model; external calendars are integrations
+
+**Decision.** IND's own shifts are the source of truth for scheduling. Apple and Google calendars
+are integrations we import from and export to, never the database. Recurrence materialises real
+shift rows linked by `series_id` rather than running a virtual recurrence engine.
+
+**Why.** An external calendar event holds a title and a time range. It does not hold the job, the
+rate, or anything else the scheduled → worked → logged flow depends on, so the "How did tonight
+go?" prompt could not open prefilled from one. Building on an external calendar would also put
+scheduling behind a permission prompt, break it offline, and make IND's data hostage to whatever
+a user does in a different app.
+
+Materialising rows rather than computing occurrences means editing or cancelling one instance is
+an ordinary row edit, with no exception-rule machinery. Virtual recurrence with exceptions is
+where calendar implementations go to die, and it syncs badly besides.
+
+**Consequences.** `data/calendar/` gets a `CalendarPort` with EventKit and Google adapters, on
+the same reasoning as the backend port — two vendor implementations, neither leaking upward, one
+of them behind a permission prompt features shouldn't know about. External event identifiers are
+**local-only and never synced**: EventKit identifiers are scoped to a single device's calendar
+store, so replicating them would cause silent mismatches and duplicate imports.
 
 ---
 
@@ -476,8 +534,6 @@ input rules and the accessibility floor.
 
 Tracked here so they aren't lost:
 
-- **What else Pro includes** beyond sync — insights, reports, tax exports, calendar integration.
 - **Pricing shape** — subscription, one-time, or both.
-- **Purchase implementation** — StoreKit 2 direct vs. RevenueCat ([ADR-011](#adr-011)).
 - **Whether `IND` is the final name.** It sets the bundle identifier, which is trivial to change
   now and disruptive after a TestFlight build. Set to `studio.mikanoko.ind`.
