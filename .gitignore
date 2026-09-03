@@ -45,5 +45,12 @@ example
 # coverage
 /coverage
 
-# env
+# env — cover every variant, not just .env and .env*.local
 .env
+.env.*
+!.env.example
+
+# store credentials
+google-service-account*.json
+*-service-account*.json
+play-store-key*.json

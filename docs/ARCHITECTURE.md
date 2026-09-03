@@ -74,7 +74,6 @@ export interface AuthPort {
   onSessionChange(listener: (session: Session | null) => void): Unsubscribe;
   signInWithApple(): Promise<Session>;
   signInWithGoogle(): Promise<Session>;
-  signInWithEmail(email: string): Promise<void>; // magic link
   signOut(): Promise<void>;
 }
 

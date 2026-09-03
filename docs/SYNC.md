@@ -239,8 +239,24 @@ IND supports **one account per installation**. The sync engine compares the sign
 `local_account.remote_user_id` and **refuses to sync on mismatch** rather than mixing two
 people's financial records.
 
+Identity linking ([ADR-020](DECISIONS.md#adr-020)) makes genuine mismatches rarer than they would
+otherwise be: signing in with Google on a user who has already linked Google resolves to the
+_same_ user id, so it is not a mismatch at all. What remains is a real second account — someone
+else's phone, or a second identity that was never linked.
+
 Resolving it requires an explicit choice from the user: keep the existing local data and adopt
 it into the new account, or delete it. Never silently merge.
+
+### Signing in to an account with no records
+
+Distinct from a mismatch, and easier to get wrong. When authentication succeeds but the server
+returns nothing, the client cannot tell a genuine new user from someone who reached for the wrong
+provider.
+
+**Rule: do not push local rows until the user confirms.** Ask first — _"This sign-in has no
+backup. If you have used a different sign-in before, try that one instead."_ Uploading
+optimistically is what turns a recoverable wrong-provider tap into two divergent cloud histories,
+and [ADR-020](DECISIONS.md#adr-020) does not support merging those.
 
 ### Losing Pro
 

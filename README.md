@@ -75,13 +75,14 @@ Generated migrations are never edited after release — they have run against re
 
 Read in this order:
 
-| Document                                | What it covers                                                |
-| --------------------------------------- | ------------------------------------------------------------- |
-| [PRODUCT.md](docs/PRODUCT.md)           | What IND is, who it's for, free vs. Pro, product principles   |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, dependency rules, folder structure, the backend port  |
-| [DATA-MODEL.md](docs/DATA-MODEL.md)     | Entities, money handling, time handling, schema conventions   |
-| [SYNC.md](docs/SYNC.md)                 | The sync protocol specification                               |
-| [DECISIONS.md](docs/DECISIONS.md)       | Architecture decision record — every choice and its reasoning |
+| Document                                | What it covers                                                     |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| [PRODUCT.md](docs/PRODUCT.md)           | What IND is, who it's for, free vs. Pro, product principles        |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, dependency rules, folder structure, the backend port       |
+| [DESIGN.md](docs/DESIGN.md)             | How it should look and behave; interaction, theming, accessibility |
+| [DATA-MODEL.md](docs/DATA-MODEL.md)     | Entities, money handling, time handling, schema conventions        |
+| [SYNC.md](docs/SYNC.md)                 | The sync protocol specification                                    |
+| [DECISIONS.md](docs/DECISIONS.md)       | Architecture decision record — every choice and its reasoning      |
 
 Every significant technical choice is recorded as an ADR in `DECISIONS.md`. If you are about to
 make one, add an entry.

@@ -50,23 +50,14 @@ their users at a login screen, and you cannot earn the trust of someone who neve
 
 ## Tiers
 
-### Accounts — free, optional
-
-Anyone can create an account. An account establishes identity: it's what a subscription
-attaches to and what makes an upgrade a single tap.
-
-Being signed in does **not**, by itself, sync anything. This is worth being explicit about
-internally, because it's an easy thing to get wrong in the UI: a free signed-in account is an
-identity, not a backup. The UI must never imply otherwise.
-
 ### Free
 
 - Unlimited local use — unlimited jobs, shifts, and history. No caps.
 - **Unrestricted export** of all data, CSV and JSON.
-- An optional account.
+- **No account. No sign-in. No login screen anywhere.**
 
 Free users are not on a trial and are not nagged into a corner. IND is genuinely useful
-forever without paying.
+forever without paying, and a free user never encounters authentication at all.
 
 ### Pro
 
@@ -105,6 +96,106 @@ be presented to users as a substitute for Pro:
 - deleting the app deletes its data regardless of backup
 
 We treat it as a happy accident, never as a promise.
+
+## Identity and access
+
+### There are no user accounts, from the user's point of view
+
+IND never asks anyone to create an account. There is no email/password, no sign-up form, no
+verification step, and no standalone "create account" or "sign in" entry point anywhere in the
+product.
+
+What exists internally is a Supabase user, created behind the scenes the first time someone
+turns on backup. That is an implementation detail and must never surface as one. The UI sells
+and describes **"Back up & sync"** — never "create an account". See
+[ADR-019](DECISIONS.md#adr-019).
+
+### The three flows
+
+**Free — no authentication at all.**
+Install, log a shift, use it forever. Nothing to sign into.
+
+**Turning on Pro.**
+Settings → **Back up & sync** → paywall → purchase → _then_ **Continue with Apple** or
+**Continue with Google** → first sync runs. One tap, Face ID, done: no form, no password, no
+email.
+
+**New device or reinstall.**
+Restore purchase (entitlement comes from the store) → **Continue with Apple/Google** → synced
+records come back.
+
+Note the ordering: authentication happens _after_ purchase, as a step inside enabling backup,
+not as a gate in front of the app.
+
+### One user, multiple identities
+
+**Apple is not "the iOS option" and Google is not "the Android option."** Both providers are
+offered wherever practical, and one internal user can have **both identities attached**:
+
+```
+Supabase user 123
+  ├── Apple identity
+  └── Google identity
+```
+
+The failure this prevents: someone signs in with Apple on their iPhone, later signs in with
+Google on an Android phone, and silently ends up with two separate cloud histories — the second
+one empty. They would reasonably conclude their records were lost.
+
+**Linking is explicit and happens while already signed in.** Supabase can auto-link providers
+that return the same verified email, but we do not rely on it: Apple's **Hide My Email** returns
+a relay address that will never match a Google address, so automatic linking fails for exactly
+the most privacy-conscious users.
+
+Three rules follow:
+
+1. **Prompt to link early.** Once the first sync completes, offer to add the other sign-in
+   method — "so you can get back in from any phone." Once, dismissible, and worth showing.
+2. **Never push local rows into a freshly created empty account.** If someone authenticates and
+   the server has no records for them, that is either a genuine new user or a wrong-provider
+   mistake, and the two are indistinguishable. Ask before writing: _"This sign-in has no backup.
+   If you've used a different sign-in before, try that one instead."_ Uploading first is what
+   turns a recoverable mistake into a split history.
+3. **You cannot unlink your last identity.** Doing so would lock someone out of their own
+   backup.
+
+See [ADR-020](DECISIONS.md#adr-020).
+
+### Billing is separate from identity
+
+The stores decide **what you have paid for**. Apple and Google sign-in decide **whose records
+we are syncing**. These are deliberately independent:
+
+- Entitlement is read from StoreKit / Play Billing, never from Supabase.
+- The store account and the sign-in provider need not match. Buying through the App Store and
+  signing in with Google is a legitimate, supported combination.
+- "Purchased but not yet signed in" is a normal transient state — it is exactly the restore
+  flow — and must not be treated as an error.
+
+See [ADR-021](DECISIONS.md#adr-021).
+
+### The states the UI must handle
+
+The second row is the dangerous one: it is where the interface can quietly imply that someone's
+income records are safe when they are not.
+
+| State                   | What Settings must convey                                        |
+| ----------------------- | ---------------------------------------------------------------- |
+| Free, no account        | Default. Offer backup, do not nag                                |
+| **Signed in, no Pro**   | **"Your records are not backed up."** Plainly. Restore path only |
+| Pro, synced             | "Last synced 2 minutes ago"                                      |
+| Pro, sync failing       | Last-synced time. Never a blocking error — data is safe locally  |
+| Pro lapsed              | Sync stopped. Records intact, export intact, nothing deleted     |
+| Signed in, empty backup | Offer the wrong-provider check before writing anything           |
+| Account mismatch        | Explicit keep-or-delete decision — see [SYNC.md](SYNC.md)        |
+
+### Obligations that come with having identities at all
+
+- **In-app account deletion is mandatory** under App Store rules. A real flow, not a link to a
+  web page, and it must be honest about what it deletes: the server copy and the internal user,
+  not the records on the device.
+- **Restore Purchases must work before sign-in**, since the store restores against the Apple ID
+  or Google account, not against ours.
 
 ## Open product questions
 

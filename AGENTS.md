@@ -9,13 +9,14 @@ code. Do not rely on remembered API shapes.
 
 Architecture and reasoning live in `docs/`, and they are current:
 
-| Document                                | What it covers                                    |
-| --------------------------------------- | ------------------------------------------------- |
-| [PRODUCT.md](docs/PRODUCT.md)           | What IND is, free vs. Pro, product principles     |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, dependency rules, the backend port        |
-| [DATA-MODEL.md](docs/DATA-MODEL.md)     | Schema conventions, money handling, time handling |
-| [SYNC.md](docs/SYNC.md)                 | The sync protocol specification                   |
-| [DECISIONS.md](docs/DECISIONS.md)       | ADR trail — every choice and why                  |
+| Document                                | What it covers                                              |
+| --------------------------------------- | ----------------------------------------------------------- |
+| [PRODUCT.md](docs/PRODUCT.md)           | What IND is, free vs. Pro, product principles               |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, dependency rules, the backend port                  |
+| [DESIGN.md](docs/DESIGN.md)             | Interaction model, visual direction, theming, accessibility |
+| [DATA-MODEL.md](docs/DATA-MODEL.md)     | Schema conventions, money handling, time handling           |
+| [SYNC.md](docs/SYNC.md)                 | The sync protocol specification                             |
+| [DECISIONS.md](docs/DECISIONS.md)       | ADR trail — every choice and why                            |
 
 Making an architectural decision? Add an ADR to `DECISIONS.md`. If implementation contradicts
 a doc, stop and raise it rather than silently changing the architecture.

@@ -71,6 +71,11 @@ sign-up wall, because utility apps lose most of their users at a login screen.
 thing for UI to misrepresent — it must never imply backup. The most compelling paid feature is
 now sync, so other Pro value (insights, reports, tax exports) is an open product question.
 
+**Amended by [ADR-019](#adr-019).** "Anyone can create an account" overstated it. Account
+creation is never offered as a user-facing action at all; the internal user is created as a side
+effect of turning on backup. Free use involves no authentication whatsoever. The signed-in-
+without-Pro state still exists, but only transiently, as part of the restore flow.
+
 ---
 
 ## ADR-005 — Durability is the product, so the server is committed
@@ -181,7 +186,7 @@ appears. Revisit only if a real back-office need materialises.
 
 ## ADR-010 — Supabase as the backend, behind a port
 
-**Decision.** Supabase provides Postgres, Auth (Apple, Google, email magic link), and row-level
+**Decision.** Supabase provides Postgres, Auth (Apple and Google — see [ADR-018](#adr-018)), and row-level
 security. It is reached exclusively through two interfaces — `AuthPort` and `SyncTransport` —
 and `@supabase/supabase-js` may only be imported inside
 `src/data/sync/adapters/supabase/**`, enforced by ESLint.
@@ -247,6 +252,10 @@ consistent without a styling framework between us and those colors.
 
 **Consequences.** No NativeWind, Tamagui, or Unistyles. Token names are semantic (`textPrimary`,
 `surfaceElevated`), never literal colors, so the palette can change centrally.
+
+**Extended by [ADR-022](#adr-022).** Platform colors alone cannot serve the whole interface —
+they are opaque and cannot be interpolated — so tokens are split into a natively-resolved
+semantic layer and an owned content layer.
 
 ---
 
@@ -325,6 +334,144 @@ reconciliation keys off `_sync_state != 'synced'` rather than a pending bit.
 
 ---
 
+## ADR-018 — Sign-in is Apple and Google only
+
+**Decision.** Sign in with Apple and Google sign-in. No email/password, no magic link, no email
+verification anywhere in the product.
+
+**Why.** Magic links and email verification are a common source of user drop-off — links landing
+in spam, expiring before they are opened, opening in the wrong browser, or breaking entirely
+inside in-app webviews. For an app whose whole pitch is "log a shift in seconds," an
+authentication path that can silently fail in someone's inbox is the wrong trade. Apple and
+Google are already on the device, and both return an ID token exchanged directly with Supabase.
+Offering Apple is not optional in any case: App Store review requires Sign in with Apple wherever
+another third-party sign-in is offered.
+
+**Consequences.** `AuthPort` exposes exactly two sign-in methods. Account recovery is delegated
+entirely to Apple and Google — someone who loses access to both loses their IND account, and
+there is no fallback channel to reach them, particularly under Apple's Hide My Email. That is
+acceptable because sign-in is optional and local data is unaffected by it: losing an account
+costs sync, not records. Revisit only if support volume shows people genuinely stranded.
+
+---
+
+## ADR-019 — No user-facing accounts; sign-in appears only as "Back up & sync"
+
+**Decision.** IND never offers account creation or standalone sign-in. There is no sign-up form,
+no email/password, no verification, and no "Sign in" entry point. Free use requires no
+authentication of any kind. Authentication appears only as a step inside enabling Pro backup, or
+when restoring on a new device. The UI describes **"Back up & sync"**, never "create an account".
+
+**Why.** A free signed-in account backs up nothing, so a visible "Sign in" row invites people to
+authenticate, see their name, and reasonably conclude their income records are safe when they
+are not. That is the worst misunderstanding this product can create. Removing the standalone
+entry point removes the misunderstanding at the source rather than trying to caveat it in copy.
+It also keeps first-run friction at zero — utility apps lose most of their users at a login
+screen, and there is nothing to gain by asking before there is anything to sync.
+
+**Consequences.** The Supabase user is an implementation detail and is created lazily, as a side
+effect of the purchase flow. Authentication happens _after_ purchase, not before. Settings shows
+sign-in state only once backup exists. The signed-in-without-Pro state remains reachable via
+restore and must state plainly that records are not backed up.
+
+---
+
+## ADR-020 — One internal user, multiple linked identities
+
+**Decision.** Apple and Google are both offered wherever practical, and a single Supabase user
+can have both identities attached. Linking is explicit, user-initiated, and performed while
+already signed in.
+
+**Why.** Treating Apple as "the iOS option" and Google as "the Android option" produces a silent
+data-loss experience: sign in with Apple on an iPhone, later sign in with Google on an Android
+phone, and you land in a second, empty cloud history and conclude your records are gone. Nothing
+was actually lost, but the user cannot tell the difference.
+
+Supabase can automatically link providers returning the same verified email, but we do not
+depend on it: Apple's Hide My Email returns a relay address that will never match a Google
+address, so automatic linking fails precisely for the most privacy-conscious users — and
+email-equality is a weak identity claim to hang a financial record set on.
+
+**Consequences.** Three rules the implementation must honour:
+
+1. Prompt to add the second sign-in method once the first sync completes — once, dismissible.
+2. **Never upload local rows into a freshly created empty account.** An empty server-side account
+   is indistinguishable from a wrong-provider mistake, so ask before writing. Uploading first is
+   what converts a recoverable mistake into a genuinely split history.
+3. The last remaining identity cannot be unlinked; doing so would lock someone out of their own
+   backup.
+
+Merging two users that both already hold records is **not supported**. Prevention above should
+make it rare; when it happens it is a support case (`ind@mikanoko.studio`) resolved server-side,
+not a UI flow. Revisit only if it proves common.
+
+---
+
+## ADR-021 — Entitlement comes from the stores, identity comes from Apple/Google sign-in
+
+**Decision.** Purchase state is read from StoreKit and Google Play Billing. Identity — whose
+records are being synced — comes from Apple/Google sign-in via Supabase. The two are independent
+and are never derived from one another.
+
+**Why.** They answer different questions and are owned by different systems. The store knows what
+was paid for and is the only authority Apple and Google will accept; Supabase knows whose rows
+these are. Coupling them would break ordinary cases — someone who buys through the App Store and
+signs in with Google is doing nothing unusual and must be supported.
+
+**Consequences.** The entitlement check never queries Supabase. "Purchased but not yet signed in"
+is a normal transient state — it is the restore flow — and must not be treated as an error.
+Restore Purchases has to work before any sign-in, because the store restores against the user's
+Apple ID or Google account rather than ours.
+
+---
+
+## ADR-022 — Two token layers: native semantics for chrome, owned values for content
+
+**Decision.** Theme tokens live in one module in two layers. `semantic.ts` resolves to
+`DynamicColorIOS` / `PlatformColor` and covers chrome — labels, separators, backgrounds, fills.
+`content.ts` holds explicit light/dark value pairs and covers anything that must be read,
+blended, or animated: the money figure, the shift shapes, charts, the accent. IND follows the
+system appearance; there is **no in-app light/dark override**.
+
+**Why.** Natively-resolved colours are strictly better for chrome: the OS resolves them at draw
+time, so switching appearance costs no JS re-render, there is no wrong-theme flash on launch, and
+Increase Contrast and Reduce Transparency come for free. But `PlatformColor` values are opaque —
+they cannot be read, interpolated, animated, or passed to a gradient — and the signature shift
+visualisation ([DESIGN.md](DESIGN.md)) needs all four. One layer cannot do both jobs.
+
+Declining an in-app appearance override is what keeps the native path viable: `DynamicColorIOS`
+follows the OS and would ignore an override, forcing every token back into JS resolution to serve
+a setting most people never touch.
+
+**Consequences.** `useColorScheme()` is used narrowly — only where JS must know the mode to pick a
+content palette — never as the mechanism for ordinary colour. Adding an appearance override later
+would mean moving `semantic.ts` to JS-resolved values, so it is a decision to reverse
+deliberately rather than drift into. Still no styling framework; this remains `StyleSheet` plus a
+typed token module.
+
+---
+
+## ADR-023 — Story flows for setup, one fast surface for logging
+
+**Decision.** One question per screen for onboarding, adding or editing a job, and other rare or
+complex flows. **Logging a shift is deliberately exempt**: it is a single screen that arrives
+mostly pre-filled, where the common case is confirming rather than filling in.
+
+**Why.** The two flows have opposite economics. Configuring a job — pay rate, pay period, week
+start, overtime threshold, tip-out rules — happens once and is genuinely complicated; as a form
+it is a wall of fields nobody reads, while one question at a time lets each carry the reason it
+is being asked. Logging a shift happens five nights a week, at 2am, one-handed and tired. Six
+screens for that is faithful to the pattern and fatal to the product: people stop logging, and an
+income record with gaps is worse than none because it misleads.
+
+**Consequences.** Two interaction vocabularies coexist deliberately, and which one a flow gets is
+a design decision made per flow, not a default. Defaults matter disproportionately on the logging
+surface — last job used, business day derived from the job's day-start hour — because they are
+what turn filling in into confirming. No dropdowns anywhere; see [DESIGN.md](DESIGN.md) for the
+input rules and the accessibility floor.
+
+---
+
 ## Open, not yet decided
 
 Tracked here so they aren't lost:
@@ -333,4 +480,4 @@ Tracked here so they aren't lost:
 - **Pricing shape** — subscription, one-time, or both.
 - **Purchase implementation** — StoreKit 2 direct vs. RevenueCat ([ADR-011](#adr-011)).
 - **Whether `IND` is the final name.** It sets the bundle identifier, which is trivial to change
-  now and disruptive after a TestFlight build. Placeholder: `com.danielknowles.ind`.
+  now and disruptive after a TestFlight build. Set to `studio.mikanoko.ind`.
