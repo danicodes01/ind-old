@@ -57,59 +57,17 @@ describe('workDateFor', () => {
     expect(workDateFor(at, london)).toBe('2026-06-15');
   });
 
-  describe('with a business day that starts in the small hours', () => {
-    // A hospitality job whose day starts at 05:00, so a shift running 20:00 to 03:00 sits
-    // entirely on one business day.
-    const dayStart = 5;
-
-    it('assigns a late-evening start to that evening', () => {
-      // 2026-06-15T00:00:00Z is 20:00 on 14 June in New York.
-      expect(workDateFor(instantFromISO('2026-06-15T00:00:00Z'), newYork, dayStart)).toBe(
-        '2026-06-14',
-      );
-    });
-
-    it('assigns an after-midnight start to the previous evening', () => {
-      // 2026-06-15T06:00:00Z is 02:00 on 15 June in New York — still the 14th's shift.
-      expect(workDateFor(instantFromISO('2026-06-15T06:00:00Z'), newYork, dayStart)).toBe(
-        '2026-06-14',
-      );
-    });
-
-    it('assigns a morning start to that morning', () => {
-      // 2026-06-15T14:00:00Z is 10:00 on 15 June in New York.
-      expect(workDateFor(instantFromISO('2026-06-15T14:00:00Z'), newYork, dayStart)).toBe(
-        '2026-06-15',
-      );
-    });
-
-    it('handles the boundary hour itself as the new day', () => {
-      // 2026-06-15T09:00:00Z is exactly 05:00 in New York.
-      expect(workDateFor(instantFromISO('2026-06-15T09:00:00Z'), newYork, dayStart)).toBe(
-        '2026-06-15',
-      );
-    });
-
-    it('rolls back across a month boundary', () => {
-      // 2026-07-01T06:00:00Z is 02:00 on 1 July in New York; the shift belongs to 30 June.
-      expect(workDateFor(instantFromISO('2026-07-01T06:00:00Z'), newYork, dayStart)).toBe(
-        '2026-06-30',
-      );
-    });
-
-    it('resolves correctly across the spring-forward transition', () => {
-      // 2026-03-08T08:00:00Z is 04:00 EDT, after the clocks jumped. Before 05:00, so the
-      // shift still belongs to the 7th.
-      expect(workDateFor(instantFromISO('2026-03-08T08:00:00Z'), newYork, dayStart)).toBe(
-        '2026-03-07',
-      );
-    });
+  it('gives an evening shift the date it started, across midnight', () => {
+    // Clock in 8pm Saturday, out 3am Sunday. The default is Saturday, which is the night a
+    // bartender would call it.
+    expect(workDateFor(instantFromISO('2026-06-14T00:00:00Z'), newYork)).toBe('2026-06-13');
   });
 
-  it.each([-1, 24, 1.5])('rejects a day start hour of %p', (hour) => {
-    expect(() => workDateFor(instantFromISO('2026-06-15T02:00:00Z'), newYork, hour)).toThrow(
-      DomainError,
-    );
+  it('defaults an after-midnight start to the new day — the case the user has to correct', () => {
+    // Clocking in at 12:30am for the tail of Saturday night defaults to Sunday. This is the
+    // known limit of the default, and why work_date is stored and editable rather than derived
+    // on read. See ADR-008.
+    expect(workDateFor(instantFromISO('2026-06-14T04:30:00Z'), newYork)).toBe('2026-06-14');
   });
 });
 

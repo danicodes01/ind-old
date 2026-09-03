@@ -1,3 +1,23 @@
+CREATE TABLE `expenses` (
+	`id` text PRIMARY KEY NOT NULL,
+	`created_at` integer NOT NULL,
+	`updated_at` integer DEFAULT 0 NOT NULL,
+	`deleted_at` integer,
+	`_sync_state` text DEFAULT 'local_only' NOT NULL,
+	`_base_updated_at` integer,
+	`_local_updated_at` integer NOT NULL,
+	`date` text NOT NULL,
+	`amount_minor` integer NOT NULL,
+	`currency` text NOT NULL,
+	`category` text,
+	`job_id` text,
+	`note` text,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE no action
+);
+--> statement-breakpoint
+CREATE INDEX `expenses_date_idx` ON `expenses` (`date`);--> statement-breakpoint
+CREATE INDEX `expenses_job_idx` ON `expenses` (`job_id`);--> statement-breakpoint
+CREATE INDEX `expenses_sync_state_idx` ON `expenses` (`_sync_state`);--> statement-breakpoint
 CREATE TABLE `jobs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`created_at` integer NOT NULL,
@@ -10,13 +30,8 @@ CREATE TABLE `jobs` (
 	`color_token` text NOT NULL,
 	`currency` text NOT NULL,
 	`base_pay_minor` integer,
-	`pay_period` text NOT NULL,
-	`pay_period_anchor` text,
-	`week_starts_on` integer DEFAULT 0 NOT NULL,
-	`day_start_hour` integer DEFAULT 0 NOT NULL,
-	`overtime_daily_minutes` integer,
-	`overtime_weekly_minutes` integer,
-	`overtime_rate_basis_points` integer,
+	`withholds_tax` integer,
+	`tips_covered` integer,
 	`is_active` integer DEFAULT 1 NOT NULL,
 	`sort_order` integer DEFAULT 0 NOT NULL
 );
@@ -32,6 +47,10 @@ CREATE TABLE `settings` (
 	`id` integer PRIMARY KEY NOT NULL,
 	`default_job_id` text,
 	`locale_override` text,
+	`week_starts_on` integer DEFAULT 0 NOT NULL,
+	`tax_enabled` integer DEFAULT 0 NOT NULL,
+	`set_aside_percent_bp` integer,
+	`tax_reminders_enabled` integer DEFAULT 0 NOT NULL,
 	`pro_entitlement_cached` integer DEFAULT 0 NOT NULL,
 	`pro_entitlement_checked_at` integer,
 	FOREIGN KEY (`default_job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE no action
@@ -46,19 +65,33 @@ CREATE TABLE `shifts` (
 	`_base_updated_at` integer,
 	`_local_updated_at` integer NOT NULL,
 	`job_id` text NOT NULL,
-	`started_at` integer NOT NULL,
+	`status` text DEFAULT 'worked' NOT NULL,
+	`scheduled_start_at` integer,
+	`scheduled_end_at` integer,
+	`started_at` integer,
 	`ended_at` integer,
+	`series_id` text,
 	`work_date` text NOT NULL,
 	`tz` text NOT NULL,
 	`break_minutes` integer DEFAULT 0 NOT NULL,
 	`pay_rate_minor_override` integer,
+	`tips_cash_minor` integer DEFAULT 0 NOT NULL,
+	`tips_card_minor` integer DEFAULT 0 NOT NULL,
+	`tips_other_minor` integer DEFAULT 0 NOT NULL,
+	`tip_out_minor` integer DEFAULT 0 NOT NULL,
 	`note` text,
-	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE no action
+	`feeling` integer,
+	`_external_event_id` text,
+	`_external_calendar` text,
+	FOREIGN KEY (`job_id`) REFERENCES `jobs`(`id`) ON UPDATE no action ON DELETE no action,
+	CONSTRAINT "shifts_has_a_time" CHECK("shifts"."scheduled_start_at" IS NOT NULL OR "shifts"."started_at" IS NOT NULL)
 );
 --> statement-breakpoint
 CREATE INDEX `shifts_job_idx` ON `shifts` (`job_id`);--> statement-breakpoint
 CREATE INDEX `shifts_work_date_idx` ON `shifts` (`work_date`);--> statement-breakpoint
+CREATE INDEX `shifts_status_idx` ON `shifts` (`status`);--> statement-breakpoint
 CREATE INDEX `shifts_started_at_idx` ON `shifts` (`started_at`);--> statement-breakpoint
+CREATE INDEX `shifts_series_idx` ON `shifts` (`series_id`);--> statement-breakpoint
 CREATE INDEX `shifts_sync_state_idx` ON `shifts` (`_sync_state`);--> statement-breakpoint
 CREATE TABLE `sync_conflicts` (
 	`id` text PRIMARY KEY NOT NULL,
@@ -75,22 +108,3 @@ CREATE TABLE `sync_state` (
 	`last_pulled_at` integer,
 	`last_pushed_at` integer
 );
---> statement-breakpoint
-CREATE TABLE `tip_entries` (
-	`id` text PRIMARY KEY NOT NULL,
-	`created_at` integer NOT NULL,
-	`updated_at` integer DEFAULT 0 NOT NULL,
-	`deleted_at` integer,
-	`_sync_state` text DEFAULT 'local_only' NOT NULL,
-	`_base_updated_at` integer,
-	`_local_updated_at` integer NOT NULL,
-	`shift_id` text NOT NULL,
-	`kind` text NOT NULL,
-	`amount_minor` integer NOT NULL,
-	`currency` text NOT NULL,
-	`note` text,
-	FOREIGN KEY (`shift_id`) REFERENCES `shifts`(`id`) ON UPDATE no action ON DELETE no action
-);
---> statement-breakpoint
-CREATE INDEX `tip_entries_shift_idx` ON `tip_entries` (`shift_id`);--> statement-breakpoint
-CREATE INDEX `tip_entries_sync_state_idx` ON `tip_entries` (`_sync_state`);
